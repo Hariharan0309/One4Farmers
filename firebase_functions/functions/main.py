@@ -1,20 +1,32 @@
 from firebase_functions import https_fn
 from firebase_functions.options import set_global_options, MemoryOption
-from firebase_admin import initialize_app
+from firebase_admin import initialize_app, firestore, storage
+
+from google import genai
 
 import vertexai
-from vertexai import agent_engines
+from vertexai import agent_engines, generative_models
+from vertexai.preview.generative_models import Part, Content, GenerativeModel
 import json
+import requests
 
 # --- Configuration ---
+GOOGLE_API_KEY="AIzaSyByjL39m5mXlJxNZOwRfpsN2ewVHZfjuMc"
 PROJECT_ID = "valued-mediator-461216-k7"
 LOCATION = "us-central1"
 REASONING_ENGINE_ID = "2569752188159000576"
+
+RESPONSE_BUCKET_NAME = "valued-mediator-461216-k7.firebasestorage.app"
+VOICE = 'Kore'
 # --------------------
 
 # Initialize Firebase Admin SDK once in the global scope.
 initialize_app()
-set_global_options(max_instances=10, memory=MemoryOption.GB_1)
+set_global_options(
+    max_instances=10,
+    memory=MemoryOption.GB_1,
+    timeout_sec=300,  # Increase timeout to 5 minutes
+)
 
 # --- Lazy Initialization for Vertex AI Client ---
 _remote_app = None
@@ -86,3 +98,135 @@ def get_or_create_session(req: https_fn.Request) -> https_fn.Response:
         print(f"An internal error occurred: {e}")
         return https_fn.Response(f"An internal error occurred: {e}", status=500)
 
+@https_fn.on_request()
+def stream_query_agent(req: https_fn.Request) -> https_fn.Response:
+    """
+    An HTTP endpoint that queries the agent with either text or audio.
+    Expects a JSON body with 'user_id', 'session_id', and either 'message' (text)
+    or 'audio_url' (a GCS link to an audio file).
+    """
+    try:
+        request_json = req.get_json(silent=True)
+        # Check for required fields
+        if not request_json or 'user_id' not in request_json or 'session_id' not in request_json:
+            return https_fn.Response("Error: Please provide 'user_id' and 'session_id'.", status=400)
+        
+        user_id = request_json['user_id']
+        session_id = request_json['session_id']
+        
+        # --- Prepare the message for the agent ---
+        message_parts = []
+        
+        text_message = request_json.get('message')
+        audio_url = request_json.get('audio_url')
+        
+        if audio_url:
+            print(f"Received audio URL: {audio_url}")
+            response = requests.get(audio_url)
+            response.raise_for_status()
+            audio_data = response.content
+            
+            # Assume the audio is always .m4a (AAC in an MP4 container)
+            mime_type = "audio/mp4"
+            print(f"Using hardcoded MIME type: '{mime_type}' for .m4a file.")
+
+            audio_part = Part.from_data(data=audio_data, mime_type=mime_type)
+            message_parts.append(audio_part)
+            print("Successfully processed audio URL into a message Part.")
+
+            if not text_message:
+                text_message = "Please transcribe and respond to this audio."
+                print(f"No text message provided with audio. Using default: '{text_message}'")
+
+        if text_message:
+            message_parts.append(Part.from_text(text_message))
+            print(f"Added text message: '{text_message}'")
+        
+        if not message_parts:
+            return https_fn.Response("Error: Please provide a 'message' or 'audio_url'.", status=400)
+
+        # --- THIS IS THE FIX: Create a Content object and convert it to a dictionary ---
+        # This matches the `Dict[str, Any]` type expected by the function.
+        final_message = Content(parts=message_parts, role="user").to_dict()
+
+        remote_app = get_remote_app()
+
+        # --- Query the Agent and Collect the Streamed Response ---
+        print(f"Streaming query for session '{session_id}'...")
+        full_response_text = ""
+        for event in remote_app.stream_query(
+            user_id=user_id,
+            session_id=session_id,
+            message=final_message, # Send the correctly formatted dictionary
+        ):
+            print(f"\n[EVENT]: {event}")
+            if event.get('content') and event.get('content').get('parts'):
+                for part in event['content']['parts']:
+                    if part.get('text'):
+                        full_response_text += part['text']
+        
+        print(f"Full agent response: {full_response_text}")
+        
+        response_data = json.dumps({"response": full_response_text})
+        return https_fn.Response(response_data, mimetype="application/json")
+
+    except Exception as e:
+        print(f"An error occurred in stream_query_agent: {e}")
+        return https_fn.Response(f"An internal error occurred: {e}", status=500)
+
+@https_fn.on_request()
+def analyze_image_from_url(req: https_fn.Request) -> https_fn.Response:
+    """
+    Receives an image URL, stores it in the session state in Firestore,
+    and then queries the agent.
+    Expects a JSON body with 'user_id', 'session_id', 'image_url', and 'message'.
+    """
+    try:
+        request_json = req.get_json(silent=True)
+        required_fields = ['user_id', 'session_id', 'image_url', 'message']
+        if not request_json or not all(field in request_json for field in required_fields):
+            return https_fn.Response(
+                "Error: Please provide 'user_id', 'session_id', 'image_url', and 'message' in the JSON body.", 
+                status=400
+            )
+        
+        user_id = request_json['user_id']
+        session_id = request_json['session_id']
+        image_url = request_json['image_url']
+        message = request_json['message']
+
+        # 1. Store the image URL in the Firestore session state
+        print(f"Updating session '{session_id}' with image URL...")
+        db = firestore.Client(project="valued-mediator-461216-k7", database="one4farmers")
+        session_ref = db.collection('adk_sessions').document(session_id)
+        
+        # Use update with dot notation to merge the image_url into the state map
+        session_ref.update({
+            'state.image_url': image_url
+        })
+        print(f"Successfully updated state for session '{session_id}'.")
+
+        # 2. Get the remote app and query the agent
+        remote_app = get_remote_app()
+
+        print(f"Streaming query for session '{session_id}' with message: '{message}'")
+        full_response_text = ""
+        for event in remote_app.stream_query(
+            user_id=user_id,
+            session_id=session_id,
+            message=message,
+        ):
+            print(f"\n[EVENT]: {event}")
+            if event.get('content') and event.get('content').get('parts'):
+                for part in event['content']['parts']:
+                    if part.get('text'):
+                        full_response_text += part['text']
+        
+        print(f"Full agent response: {full_response_text}")
+        
+        response_data = json.dumps({"response": full_response_text})
+        return https_fn.Response(response_data, mimetype="application/json")
+
+    except Exception as e:
+        print(f"An error occurred in analyze_image_from_url: {e}")
+        return https_fn.Response(f"An internal error occurred: {e}", status=500)
