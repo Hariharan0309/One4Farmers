@@ -15,7 +15,7 @@ manager_agent = Agent(
     2.  **IF the request is about weather, climate, or how weather affects farming, crops, or livestock:**
         - You MUST delegate the task to the `weather_agent`.
     3.  **IF the request includes an image or a URL to an image and asks for analysis of plant health, disease, or condition:**
-        - You MUST delegate the task to the `plant_disease_analyzer_agent`.
+        - You MUST delegate the task to the `plant_image_analyzer_agent`.
         - You MUST pass the user's entire original message, including text and any image or URL, to the sub-agent.
     4.  **IF the request does not fit the above categories:**
         - Respond with: "I can assist with plant disease analysis and weather-based farming advice. Please let me know what you need help with."

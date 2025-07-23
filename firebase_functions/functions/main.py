@@ -131,7 +131,7 @@ def stream_query_agent(req: https_fn.Request) -> https_fn.Response:
             print("Successfully processed audio URL into a message Part.")
 
             if not text_message:
-                text_message = "Please transcribe and respond to this audio."
+                text_message = "Listen to the audio, understand the user's question, and respond in the language spoken in the audio."
                 print(f"No text message provided with audio. Using default: '{text_message}'")
 
         if image_url:

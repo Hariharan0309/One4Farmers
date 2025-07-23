@@ -201,10 +201,15 @@ class FirestoreSessionService(BaseSessionService):
                 event_data_dict = _convert_event_to_json(event)
                 logger.info("Appending event data: %s", event_data_dict)
                 
-                # Add the event creation and session update to the batch.
+                # Add the event creation to the batch.
                 batch.set(event_doc_ref, event_data_dict)
-                batch.update(session_ref, {"updateTime": firestore.SERVER_TIMESTAMP})
-                
+
+                # Update the session document with the new state and timestamp.
+                # The `session` object was already updated in memory by `super().append_event`.
+                batch.update(session_ref, {
+                    "updateTime": firestore.SERVER_TIMESTAMP,
+                    "state": session.state
+                })
                 # Commit the batch.
                 logger.info("Committing batch to Firestore for session '%s'...", session.id)
                 batch.commit()
