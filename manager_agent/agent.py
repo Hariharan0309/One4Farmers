@@ -1,6 +1,7 @@
 from google.adk.agents import Agent
 from sub_agents.plant_image_analyzer_agent.agent import plant_image_analyzer_agent
 from sub_agents.weather_agent.agent import weather_agent
+from sub_agents.market_analysis_agent.agent import market_analysis_agent
 
 manager_agent = Agent(
     name="manager_agent",
@@ -17,10 +18,12 @@ manager_agent = Agent(
     3.  **IF the request includes an image or a URL to an image and asks for analysis of plant health, disease, or condition:**
         - You MUST delegate the task to the `plant_image_analyzer_agent`.
         - You MUST pass the user's entire original message, including text and any image or URL, to the sub-agent.
-    4.  **IF the request does not fit the above categories:**
-        - Respond with: "I can assist with plant disease analysis and weather-based farming advice. Please let me know what you need help with."
+    4.  **IF the request is about market prices, selling crops, or market trends (e.g., "what is the price of tomatoes?"):**
+        - You MUST delegate the task to the `market_analysis_agent`.
+    5.  **IF the request does not fit the above categories:**
+        - Respond with: "I can assist with plant disease analysis, weather-based farming advice, and market prices. Please let me know what you need help with."
 
     Your only job is to route the request to the correct specialist with the complete context. Do not answer directly.
     """,
-    sub_agents=[plant_image_analyzer_agent, weather_agent],
+    sub_agents=[plant_image_analyzer_agent, weather_agent, market_analysis_agent],
 )

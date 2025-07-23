@@ -9,12 +9,15 @@ import google.auth
 
 
 initial_state = {
-    "user_name": "Hariharan",
     "latitude": 51.5072,
     "longitude": -0.1276,
-    "timezone": "Europe/London"
+    "timezone": "Europe/London",
+    "state": "Tamil Nadu",
+    "district": "Villupuram",
+    "weather_last_updated": None,  # Optional, can be set later
+    "weather_forecast": None  # Optional, can be set later
 }
-USER_ID = "u_113_weather"
+USER_ID = "u_113_market"
 
 remote_app = vertexai.agent_engines.get(
     "projects/673680613234/locations/us-central1/reasoningEngines/2569752188159000576"
@@ -41,6 +44,6 @@ else:
 for event in remote_app.stream_query(
     user_id=USER_ID,
     session_id=remote_session["id"],
-    message="Can you provide me weather analysis for tomorrow?",
+    message="what is the market price of wheat today?",
 ):
     print(event)

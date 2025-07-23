@@ -2,17 +2,18 @@ from firebase_functions import https_fn
 from firebase_functions.options import set_global_options, MemoryOption
 from firebase_admin import initialize_app, firestore, storage
 
+import os
 import vertexai
 from vertexai import agent_engines, generative_models
 from vertexai.preview.generative_models import Part, Content, GenerativeModel
 import json
 import requests
-import datetime
 
 # --- Configuration ---
-PROJECT_ID = "valued-mediator-461216-k7"
-LOCATION = "us-central1"
-REASONING_ENGINE_ID = "2569752188159000576"
+# Best practice: Load configuration from environment variables with defaults.
+PROJECT_ID = os.environ.get("GCP_PROJECT", "valued-mediator-461216-k7")
+LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
+REASONING_ENGINE_ID = os.environ.get("REASONING_ENGINE_ID", "2569752188159000576")
 # --------------------
 
 # Initialize Firebase Admin SDK once in the global scope.
@@ -34,7 +35,9 @@ def get_remote_app():
     global _remote_app
     if _remote_app is None:
         print("Initializing Vertex AI client for the first time...")
-        _remote_app = agent_engines.get("projects/673680613234/locations/us-central1/reasoningEngines/2569752188159000576")
+        engine_resource_name = f"projects/{PROJECT_ID}/locations/{LOCATION}/reasoningEngines/{REASONING_ENGINE_ID}"
+        print(f"Connecting to Reasoning Engine: {engine_resource_name}")
+        _remote_app = agent_engines.get(engine_resource_name)
         print("Vertex AI client initialized.")
     return _remote_app
 

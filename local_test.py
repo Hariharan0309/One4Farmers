@@ -28,11 +28,15 @@ from vertexai.preview.generative_models import Part, Content
 initial_state = {
     "latitude": 51.5072,
     "longitude": -0.1276,
-    "timezone": "Europe/London"
+    "timezone": "Europe/London",
+    "state": "Tamil Nadu",
+    "district": "Villupuram",
+    "weather_last_updated": None,  # Optional, can be set later
+    "weather_forecast": None  # Optional, can be set later
 }
 
-TEST_QUESTION = "What is the 7-day weather forecast?"
-TEST_USER_ID = "local_weather_user_01"
+TEST_QUESTION = "What is the market price of tomatoes today?"
+TEST_USER_ID = "local_user"
 # --------------------
 
 async def main():
