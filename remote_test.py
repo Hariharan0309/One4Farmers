@@ -44,6 +44,6 @@ else:
 for event in remote_app.stream_query(
     user_id=USER_ID,
     session_id=remote_session["id"],
-    message="what is the market price of wheat today?",
+    message="List the schemes available for farmers",
 ):
     print(event)
