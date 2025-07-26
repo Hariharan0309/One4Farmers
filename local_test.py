@@ -15,6 +15,12 @@ import sys
 # at the same level as this script.
 sys.path.append(os.getcwd())
 
+# This is a workaround for a known issue with google-cloud libraries that use
+# OpenTelemetry for tracing in multi-threaded asyncio environments, which can
+# cause a "ValueError: ... was created in a different Context".
+# Disabling tracing for the client library resolves this.
+os.environ["GOOGLE_CLOUD_DISABLE_TRACING"] = "True"
+
 # Import the necessary components from your project files.
 # Make sure to replace 'weather_agent' with your actual agent package name if different.
 from manager_agent.adk_app import adk_app
@@ -22,21 +28,26 @@ from vertexai.preview.generative_models import Part, Content
 
 # --- Configuration ---
 
+TEST_USER_ID = "local_user_123"
+
 # This initial state provides the necessary location data for your
 # `get_seven_day_forecast` tool to function on the first turn.
-# Location is set to London, UK.
 initial_state = {
     "latitude": 51.5072,
     "longitude": -0.1276,
     "timezone": "Europe/London",
     "state": "Tamil Nadu",
     "district": "Villupuram",
-    "weather_last_updated": None,  # Optional, can be set later
-    "weather_forecast": None  # Optional, can be set later
+    # Add user_id and seller_name to the state to be used by the sales_agent
+    "user_id": TEST_USER_ID,
+    "seller_name": "Test Farmer Hari",
 }
 
-TEST_QUESTION = "What is the market price of tomatoes today?"
-TEST_USER_ID = "local_user"
+# This question is designed to trigger the sales_agent's sell_product tool.
+TEST_QUESTION = (
+    "I want to sell my crops. I have 150kg of tomatoes, and I want to sell"
+    " them for 25.50 per kg."
+)
 # --------------------
 
 async def main():
@@ -44,7 +55,7 @@ async def main():
     Runs a local test of the weather agent, including session creation
     and a text-based query.
     """
-    print("--- Starting Local Weather Agent Test ---")
+    print("--- Starting Local Agent Test ---")
 
     # 1. Get or create a session.
     # The session is initialized with the latitude and longitude state.

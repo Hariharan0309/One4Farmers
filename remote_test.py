@@ -9,15 +9,18 @@ import google.auth
 
 
 initial_state = {
+    "name": "Hari",
     "latitude": 51.5072,
     "longitude": -0.1276,
     "timezone": "Europe/London",
     "state": "Tamil Nadu",
     "district": "Villupuram",
     "weather_last_updated": None,  # Optional, can be set later
-    "weather_forecast": None  # Optional, can be set later
+    "weather_forecast": None,  # Optional, can be set later
+    "user_id": "u_113_sales"
 }
-USER_ID = "u_113_market"
+USER_ID = "u_113_buyer"
+PROMPT = "I would like to buy 1 kg of potatos. Can you help me with that?"
 
 remote_app = vertexai.agent_engines.get(
     "projects/673680613234/locations/us-central1/reasoningEngines/2569752188159000576"
@@ -44,6 +47,6 @@ else:
 for event in remote_app.stream_query(
     user_id=USER_ID,
     session_id=remote_session["id"],
-    message="List the schemes available for farmers",
+    message=PROMPT,
 ):
     print(event)

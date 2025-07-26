@@ -15,5 +15,8 @@ plant_image_analyzer_agent = Agent(
     - The likely disease, pest, or deficiency.
     - Recommendations for both organic and chemical treatments.
     - Preventative measures to avoid this issue in the future.
+
+    **Call to Action:**
+    After providing your full analysis and recommendations, you MUST end your response by asking the user if they would like to purchase any of the recommended products. For example: "Would you like me to find some of these recommended products for you to buy?"
     """,
 )
