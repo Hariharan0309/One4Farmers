@@ -13,14 +13,15 @@ initial_state = {
     "latitude": 51.5072,
     "longitude": -0.1276,
     "timezone": "Europe/London",
+    "acres" : 10,
     "state": "Tamil Nadu",
     "district": "Villupuram",
     "weather_last_updated": None,  # Optional, can be set later
     "weather_forecast": None,  # Optional, can be set later
-    "user_id": "u_113_sales"
+    "user_id": "finance"
 }
-USER_ID = "u_113_buyer"
-PROMPT = "I would like to buy 1 kg of potatos. Can you help me with that?"
+USER_ID = "finance"
+PROMPT = "Can you provide me advice for growing my crops in my 10 acres of land so that i may get maximum yield and profit. and estimate the profit for the advice you provide"
 
 remote_app = vertexai.agent_engines.get(
     "projects/673680613234/locations/us-central1/reasoningEngines/2569752188159000576"

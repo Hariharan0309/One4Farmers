@@ -1,6 +1,7 @@
-from firebase_functions import https_fn
+from firebase_functions import https_fn, firestore_fn
 from firebase_functions.options import set_global_options, MemoryOption
-from firebase_admin import initialize_app, firestore, storage
+from firebase_admin import initialize_app, firestore, storage, messaging
+from google.cloud import translate_v2 as translate
 
 import os
 import vertexai
@@ -41,6 +42,7 @@ set_global_options(
 # --- Lazy Initialization for Vertex AI Client ---
 _remote_app = None
 _db = None
+_translate_client = None
 
 def get_remote_app():
     """
@@ -68,6 +70,18 @@ def get_firestore_client():
         _db = firestore.Client(project=PROJECT_ID, database=DATABASE)
         print("Firestore client initialized.")
     return _db
+
+def get_translate_client():
+    """
+    Initializes and returns the Translate client, ensuring it's only
+    created once per function instance.
+    """
+    global _translate_client
+    if _translate_client is None:
+        print("Initializing Google Translate client...")
+        _translate_client = translate.Client()
+        print("Google Translate client initialized.")
+    return _translate_client
 
 
 @https_fn.on_request()
@@ -219,10 +233,10 @@ def stream_query_agent(req: https_fn.Request) -> https_fn.Response:
 @https_fn.on_request()
 def list_products(req: https_fn.Request) -> https_fn.Response:
     """
-    An HTTP endpoint that lists all available products from the Firestore
-    'products' collection. It returns all products, including those that are
-    out of stock (quantity is 0).
-    - If 'state' and 'district' are provided as query parameters, it filters by location.
+    An HTTP endpoint that lists available products from the Firestore 'products'
+    collection. It fetches products specific to the user's location AND products
+    available nationwide (where state/district is 'any').
+    - If 'state' and 'district' are provided, it filters by that location.
     - If 'user_id' is provided without a location, it attempts to find the user's
       location from their active session.
     - If a 'user_id' is provided, it will always filter out products listed by that user.
@@ -254,30 +268,42 @@ def list_products(req: https_fn.Request) -> https_fn.Response:
                 print(f"Could not fetch session location for user '{user_id}': {e}")
 
         db = get_firestore_client()
-        query = db.collection("products")
+        all_docs = {}
 
-        # All filters are now applied in the code after fetching to make the function
-        # more robust and avoid any reliance on composite indexes in Firestore.
+        # Query 1: Products available to everyone (e.g., fertilizers, seeds)
+        global_query = db.collection("products").where(
+            filter=firestore.FieldFilter("state", "==", "any")
+        ).where(
+            filter=firestore.FieldFilter("district", "==", "any")
+        )
+        for doc in global_query.stream():
+            all_docs[doc.id] = doc
+        
+        print(f"Found {len(all_docs)} global products.")
 
-        docs = query.stream()
+        # Query 2: Products specific to the user's location (if location is known)
+        if state and district:
+            local_query = db.collection("products").where(
+                filter=firestore.FieldFilter("state", "==", state)
+            ).where(
+                filter=firestore.FieldFilter("district", "==", district)
+            )
+            for doc in local_query.stream():
+                all_docs[doc.id] = doc  # Overwrites if duplicate, which is fine.
+            print(f"After adding local products from {district}, {state}, total unique products: {len(all_docs)}.")
 
         products_list = []
-        for doc in docs:
+        for doc_id, doc in all_docs.items():
             product_data = doc.to_dict()
-            # Apply location and user filters in the code.
-            if state and product_data.get("state") != state:
-                continue
-            if district and product_data.get("district") != district:
-                continue
+            
             # Apply the filter for the user's own products here in the code.
             if user_id and product_data.get("seller_id") == user_id:
                 continue
 
-            product_data["product_id"] = doc.id  # Add the document ID to the data
+            product_data["product_id"] = doc_id  # Add the document ID to the data
             products_list.append(product_data)
         
-        print(f"Found {len(products_list)} products matching the criteria.")
-        print(f"Products list: {products_list}")
+        print(f"Final list contains {len(products_list)} products after filtering.")
 
         return https_fn.Response(json.dumps({"products": products_list}, cls=DateTimeEncoder), mimetype="application/json")
 
@@ -403,7 +429,41 @@ def purchase_product(req: https_fn.Request) -> https_fn.Response:
 
                 successful_orders.append({"product_id": product_id, "order_id": new_order_id, "remaining_quantity": new_quantity})
 
-                # --- Update session state in Firestore ---
+                # --- Update seller's session with revenue ---
+                try:
+                    seller_id = product_data.get("seller_id")
+                    price = product_data.get("price_per_kg")
+                    if seller_id and price:
+                        revenue_from_sale = quantity * price
+                        
+                        sessions_ref = db.collection("adk_sessions")
+                        seller_session_query = sessions_ref.where(filter=firestore.FieldFilter("user_id", "==", seller_id)).limit(1)
+                        seller_session_docs = list(seller_session_query.stream())
+
+                        if seller_session_docs:
+                            seller_session_ref = seller_session_docs[0].reference
+
+                            @firestore.transactional
+                            def _update_seller_revenue(transaction, ref):
+                                session_snapshot = ref.get(transaction=transaction)
+                                if not session_snapshot.exists:
+                                    print(f"Warning: Seller session {ref.id} disappeared during transaction.")
+                                    return
+
+                                state = session_snapshot.to_dict().get("state", {})
+                                current_revenue = state.get("revenue", 0)
+                                if not isinstance(current_revenue, (int, float)):
+                                    current_revenue = 0
+                                new_revenue = current_revenue + revenue_from_sale
+                                transaction.update(ref, {"state.revenue": new_revenue, "updateTime": firestore.SERVER_TIMESTAMP})
+                                print(f"Successfully updated revenue for seller {seller_id} by {revenue_from_sale}. New total: {new_revenue}")
+
+                            revenue_transaction = db.transaction()
+                            _update_seller_revenue(revenue_transaction, seller_session_ref)
+                except Exception as revenue_e:
+                    print(f"Warning: An error occurred while updating seller revenue for seller {seller_id}: {revenue_e}")
+
+                # --- Update BUYER's session state in Firestore ---
                 try:
                     remote_app = get_remote_app()
                     list_sessions_response = remote_app.list_sessions(user_id=user_id)
@@ -488,6 +548,58 @@ def list_orders(req: https_fn.Request) -> https_fn.Response:
         print(f"An error occurred while listing orders: {e}")
         return https_fn.Response(json.dumps({"error": f"An internal error occurred: {e}"}), status=500, mimetype="application/json")
 
+
+@https_fn.on_request()
+def list_user_products(req: https_fn.Request) -> https_fn.Response:
+    """
+    An HTTP endpoint that lists all products a specific user has listed for sale.
+    It retrieves the list of product IDs from the user's session state and then
+    fetches the full details for each product from Firestore.
+    Expects a 'user_id' in the request body or query parameters.
+    """
+    try:
+        request_json = req.get_json(silent=True) or {}
+        user_id = req.args.get("user_id") or request_json.get("user_id")
+
+        if not user_id:
+            return https_fn.Response(json.dumps({"error": "Missing 'user_id' in request."}), status=400, mimetype="application/json")
+
+        print(f"list_user_products invoked for user_id: {user_id}")
+
+        # 1. Fetch the user's session to get the list of their products
+        remote_app = get_remote_app()
+        list_sessions_response = remote_app.list_sessions(user_id=user_id)
+        
+        product_ids = []
+        if list_sessions_response and list_sessions_response.get('sessions'):
+            session_state = list_sessions_response['sessions'][0].get('state', {})
+            products_listed_in_session = session_state.get("product_listed_in_market", [])
+            product_ids = [p.get("product_id") for p in products_listed_in_session if p.get("product_id")]
+            print(f"Found {len(product_ids)} product IDs in session for user '{user_id}'.")
+        else:
+            print(f"No active session found for user '{user_id}'.")
+            return https_fn.Response(json.dumps({"products": []}), mimetype="application/json")
+
+        if not product_ids:
+            return https_fn.Response(json.dumps({"products": []}), mimetype="application/json")
+
+        # 2. Fetch the full details for each product ID from Firestore
+        db = get_firestore_client()
+        user_products = []
+        products_collection = db.collection("products")
+        for product_id in product_ids:
+            doc = products_collection.document(product_id).get()
+            if doc.exists:
+                product_data = doc.to_dict()
+                product_data["product_id"] = doc.id
+                user_products.append(product_data)
+        
+        user_products.sort(key=lambda x: x.get("listed_at"), reverse=True)
+        return https_fn.Response(json.dumps({"products": user_products}, cls=DateTimeEncoder), mimetype="application/json")
+
+    except Exception as e:
+        print(f"An error occurred while listing user products: {e}")
+        return https_fn.Response(json.dumps({"error": f"An internal error occurred: {e}"}), status=500, mimetype="application/json")
 
 @https_fn.on_request()
 def get_agent_dashboard_orders(req: https_fn.Request) -> https_fn.Response:
@@ -599,6 +711,82 @@ def delivery_update(req: https_fn.Request) -> https_fn.Response:
         print(f"An error occurred during delivery update: {e}")
         return https_fn.Response(json.dumps({"error": f"An internal error occurred: {e}"}), status=500, mimetype="application/json")
 
+@https_fn.on_request()
+def rate_product(req: https_fn.Request) -> https_fn.Response:
+    """
+    An HTTP endpoint for a user to rate a product they have purchased.
+    It updates the product's average rating and then deletes the corresponding order.
+    Expects a JSON body with 'order_id', 'product_id', and 'rating'.
+    """
+    try:
+        request_json = req.get_json(silent=True)
+        if not request_json:
+            return https_fn.Response(json.dumps({"error": "Invalid JSON body."}), status=400, mimetype="application/json")
+
+        order_id = request_json.get("order_id")
+        product_id = request_json.get("product_id")
+        rating = request_json.get("rating")
+        user_id = request_json.get("user_id")
+
+        if not all([order_id, product_id, rating]):
+            return https_fn.Response(json.dumps({"error": "Missing 'order_id', 'product_id', or 'rating' in request."}), status=400, mimetype="application/json")
+
+        try:
+            # Ensure rating is a number and within a valid range (e.g., 1-5)
+            rating = float(rating)
+            if not 1 <= rating <= 5:
+                raise ValueError("Rating must be between 1 and 5.")
+        except (ValueError, TypeError):
+            return https_fn.Response(json.dumps({"error": "Invalid rating. It must be a number between 1 and 5."}), status=400, mimetype="application/json")
+
+        print(f"rate_product invoked for order '{order_id}', product '{product_id}' with rating {rating}.")
+
+        db = get_firestore_client()
+        product_ref = db.collection("products").document(product_id)
+        order_ref = db.collection("orders").document(order_id)
+
+        @firestore.transactional
+        def _transactional_rate_and_delete(transaction, prod_ref, ord_ref, new_rating):
+            product_snapshot = prod_ref.get(transaction=transaction)
+            if not product_snapshot.exists:
+                raise ValueError(f"Product with ID {product_id} not found.")
+
+            product_data = product_snapshot.to_dict()
+            current_rating = product_data.get("rating")
+            rating_count = product_data.get("rating_count", 0)
+
+            final_count = rating_count + 1
+            final_rating = new_rating if current_rating is None else ((float(current_rating) * int(rating_count)) + new_rating) / final_count
+
+            transaction.update(prod_ref, {"rating": final_rating, "rating_count": final_count})
+            transaction.delete(ord_ref)
+            print(f"Scheduled update for product '{product_id}' and deletion for order '{order_id}'.")
+
+        transaction = db.transaction()
+        _transactional_rate_and_delete(transaction, product_ref, order_ref, rating)
+
+        # --- Remove order_id from session state ---
+        try:
+            remote_app = get_remote_app()
+            list_sessions_response = remote_app.list_sessions(user_id=user_id)
+            if list_sessions_response and list_sessions_response.get('sessions'):
+                session_id = list_sessions_response['sessions'][0].get('id')
+                session_ref = db.collection("adk_sessions").document(session_id)
+                session_ref.update({
+                    "state.order_ids": firestore.ArrayRemove([order_id]),
+                    "updateTime": firestore.SERVER_TIMESTAMP
+                })
+                print(f"Successfully removed order '{order_id}' from session state for user '{user_id}'.")
+        except Exception as session_e:
+            # Log the session update error but don't fail the main operation.
+            print(f"Warning: Failed to remove order '{order_id}' from session state. Error: {session_e}")
+
+        return https_fn.Response(json.dumps({"message": f"Successfully rated product {product_id} and completed order {order_id}."}), mimetype="application/json")
+
+    except ValueError as ve:
+        return https_fn.Response(json.dumps({"error": str(ve)}), status=404, mimetype="application/json")
+    except Exception as e:
+        return https_fn.Response(json.dumps({"error": f"An internal error occurred: {e}"}), status=500, mimetype="application/json")
 
 @https_fn.on_request()
 def sell_product(req: https_fn.Request) -> https_fn.Response:
@@ -660,6 +848,7 @@ def sell_product(req: https_fn.Request) -> https_fn.Response:
             "price_per_kg": float(request_json["price_per_kg"]),
             "quantity_available": int(request_json["quantity_available"]),
             "rating": None,
+            "rating_count": 0,
             "listed_at": firestore.SERVER_TIMESTAMP,
         }
 
@@ -703,3 +892,132 @@ def sell_product(req: https_fn.Request) -> https_fn.Response:
     except Exception as e:
         print(f"An error occurred while selling product: {e}")
         return https_fn.Response(json.dumps({"error": f"An internal error occurred: {e}"}), status=500, mimetype="application/json")
+
+
+# --- Community Chat Functions ---
+
+@https_fn.on_request()
+def getCommunityMessages(req: https_fn.Request) -> https_fn.Response:
+    """
+    HTTP endpoint to fetch the most recent community chat messages.
+    """
+    try:
+        db = get_firestore_client()
+        # Fetch the last 50 messages, ordered by time
+        query = db.collection('community_chat').order_by(
+            'timestamp', direction=firestore.Query.DESCENDING
+        ).limit(50)
+
+        messages = []
+        for doc in query.stream():
+            msg_data = doc.to_dict()
+            msg_data['id'] = doc.id
+            messages.append(msg_data)
+        
+        # The messages are fetched in descending order, so we reverse them
+        # to show the oldest of the batch first.
+        messages.reverse()
+
+        return https_fn.Response(
+            json.dumps({"messages": messages}, cls=DateTimeEncoder),
+            mimetype="application/json"
+        )
+    except Exception as e:
+        print(f"Error getting community messages: {e}")
+        return https_fn.Response("Internal server error.", status=500)
+
+
+@https_fn.on_request()
+def sendCommunityMessage(req: https_fn.Request) -> https_fn.Response:
+    """
+    HTTP endpoint to receive, translate, and save a new chat message.
+    Expects a JSON body like: {"senderId": "user123", "senderName": "John", "text": "Hello!"}
+    """
+    if req.method != "POST" or not req.is_json:
+        return https_fn.Response("Invalid request.", status=400)
+
+    try:
+        data = req.get_json()
+        sender_id = data.get("senderId")
+        sender_name = data.get("senderName")
+        original_text = data.get("text")
+
+        if not sender_id or not sender_name or not original_text:
+            return https_fn.Response("Missing 'senderId', 'senderName', or 'text'.", status=400)
+
+        # --- Translation Step ---
+        translate_client = get_translate_client()
+        text_hi = original_text
+        text_ta = original_text
+        try:
+            # Translate to Hindi
+            translation_hi = translate_client.translate(original_text, target_language='hi')
+            text_hi = translation_hi['translatedText']
+            # Translate to Tamil
+            translation_ta = translate_client.translate(original_text, target_language='ta')
+            text_ta = translation_ta['translatedText']
+            print(f"Translated text for storage: hi='{text_hi}', ta='{text_ta}'")
+        except Exception as e:
+            print(f"Warning: Translation failed. Storing original text only. Error: {e}")
+
+        db = get_firestore_client()
+        message_data = {
+            'senderId': sender_id,
+            'senderName': sender_name,
+            'text': original_text,
+            'text_hi': text_hi,
+            'text_ta': text_ta,
+            'timestamp': firestore.SERVER_TIMESTAMP
+        }
+        db.collection('community_chat').add(message_data)
+
+        return https_fn.Response("Message sent successfully.", status=200)
+
+    except Exception as e:
+        print(f"Error sending message: {e}")
+        return https_fn.Response("Internal server error.", status=500)
+
+
+FCM_TOPIC = "community_chat_updates"
+
+@firestore_fn.on_document_created(document="community_chat/{messageId}", database=DATABASE)
+def notifyOnNewMessage(event: firestore_fn.Event[firestore.DocumentSnapshot | None]) -> None:
+    """
+    Triggered when a new message is created. Reads the message data, including
+    pre-translated text, and sends it in an FCM data message.
+    """
+    try:
+        if event.data is None:
+            print("No data associated with the event.")
+            return
+
+        message_data = event.data.to_dict()
+        sender_id = message_data.get("senderId", "unknown_id")
+        sender_name = message_data.get("senderName", "Unknown")
+        original_text = message_data.get("text", "")
+
+        if not original_text:
+            print("Message text is empty, skipping notification.")
+            return
+
+        # The translations are now read directly from the document.
+        # Fallback to original text if translated fields are missing.
+        text_hi = message_data.get("text_hi", original_text)
+        text_ta = message_data.get("text_ta", original_text)
+
+        print(f"New message from {sender_name}. Notifying topic: {FCM_TOPIC}")
+
+        message = messaging.Message(
+            data={
+                'senderId': sender_id,
+                'senderName': sender_name,
+                'text': original_text,
+                'text_hi': text_hi,
+                'text_ta': text_ta,
+            },
+            topic=FCM_TOPIC,
+        )
+        messaging.send(message)
+        print("Successfully sent FCM message.")
+    except Exception as e:
+        print(f"Error sending FCM message: {e}")

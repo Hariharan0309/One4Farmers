@@ -110,14 +110,13 @@ def list_products_for_sale(
 ) -> dict:
     """
     Lists products available for sale from the Firestore database.
+    It shows products matching the user's location, as well as products
+    available to everyone (e.g., fertilizers, seeds).
     Can be filtered by product_type and product_name.
     If state or district are not provided, it uses the values from the session.
     """
     if not db:
         return {"error": "Database connection is not available."}
-
-    # This tool can now handle broad queries (e.g., list all 'crops')
-    # or specific queries (e.g., list 'tomato' 'crops').
 
     session_state = tool_context.state
     user_id = session_state.get("user_id")
@@ -129,27 +128,42 @@ def list_products_for_sale(
         return {"error": "Location (state and district) is not available. Please ask the user for their location."}
 
     try:
-        query = db.collection(PRODUCTS_COLLECTION)
-        # Always filter by location
-        query = query.where(filter=firestore.FieldFilter("state", "==", query_state))
-        query = query.where(filter=firestore.FieldFilter("district", "==", query_district))
+        # Query 1: Products specific to the user's location
+        local_query = db.collection(PRODUCTS_COLLECTION).where(
+            filter=firestore.FieldFilter("state", "==", query_state)
+        ).where(
+            filter=firestore.FieldFilter("district", "==", query_district)
+        )
 
-        # Add optional filters if provided
+        # Query 2: Products available to everyone (e.g., fertilizers, seeds)
+        global_query = db.collection(PRODUCTS_COLLECTION).where(
+            filter=firestore.FieldFilter("state", "==", "any")
+        ).where(
+            filter=firestore.FieldFilter("district", "==", "any")
+        )
+
+        # Apply optional filters to both queries
         if product_type:
-            query = query.where(filter=firestore.FieldFilter("product_type", "==", product_type.lower()))
+            local_query = local_query.where(filter=firestore.FieldFilter("product_type", "==", product_type.lower()))
+            global_query = global_query.where(filter=firestore.FieldFilter("product_type", "==", product_type.lower()))
         if product_name:
             # Normalize the product name to handle singular/plural forms
             normalized_name = _singularize(product_name)
-            query = query.where(filter=firestore.FieldFilter("product_name", "==", normalized_name.title()))
+            local_query = local_query.where(filter=firestore.FieldFilter("product_name", "==", normalized_name.title()))
+            global_query = global_query.where(filter=firestore.FieldFilter("product_name", "==", normalized_name.title()))
 
         # The range filter on 'quantity_available' is removed from the query to avoid
-        # needing a composite index when combined with multiple equality filters.
-        # This filtering will be done in the application code after fetching the documents
-        # that match the location and name.
+        # needing a composite index. This filtering will be done in the application code.
 
-        docs = query.stream()
+        # Execute both queries and combine the results, avoiding duplicates.
+        all_docs = {}
+        for doc in local_query.stream():
+            all_docs[doc.id] = doc
+        for doc in global_query.stream():
+            all_docs[doc.id] = doc  # Overwrites if duplicate, which is fine.
+
         products = []
-        for doc in docs:
+        for doc_id, doc in all_docs.items():
             product_data = doc.to_dict()
             # Apply the filter for the user's own products here.
             if user_id and product_data.get("seller_id") == user_id:
@@ -163,7 +177,7 @@ def list_products_for_sale(
             products.append(product_data)
 
         if not products:
-            return {"message": f"No products found for the specified criteria in {query_district}, {query_state}."}
+            return {"message": f"No products found for the specified criteria in {query_district}, {query_state} or nationwide."}
 
         return {"products": products}
 
@@ -317,10 +331,52 @@ def purchase_product(
         batch.commit()
         logging.info(f"Successfully created order and assigned agent in one atomic batch write.")
 
+        # --- Update seller's session with revenue ---
+        # This is done in a separate, non-blocking step to ensure that any
+        # issues with updating the seller's revenue do not prevent the buyer's
+        # purchase from completing successfully.
+        try:
+            seller_id = product_data.get("seller_id")
+            price = product_data.get("price_per_kg")
+            if seller_id and price:
+                revenue_from_sale = quantity * price
+
+                # The collection name 'adk_sessions' is based on the ADK's default behavior.
+                sessions_ref = db.collection("adk_sessions")
+                seller_session_query = sessions_ref.where(filter=firestore.FieldFilter("user_id", "==", seller_id)).limit(1)
+                seller_session_docs = list(seller_session_query.stream())
+
+                if seller_session_docs:
+                    seller_session_ref = seller_session_docs[0].reference
+
+                    @firestore.transactional
+                    def _update_seller_revenue(transaction, ref):
+                        session_snapshot = ref.get(transaction=transaction)
+                        if not session_snapshot.exists:
+                            logging.warning(f"Seller session {ref.id} disappeared during transaction.")
+                            return
+
+                        state = session_snapshot.to_dict().get("state", {})
+                        current_revenue = state.get("revenue", 0)
+                        # Ensure revenue is a number before adding to it.
+                        if not isinstance(current_revenue, (int, float)):
+                            current_revenue = 0
+                        new_revenue = current_revenue + revenue_from_sale
+                        transaction.update(ref, {"state.revenue": new_revenue, "updateTime": firestore.SERVER_TIMESTAMP})
+                        logging.info(f"Successfully updated revenue for seller {seller_id} by {revenue_from_sale}. New total: {new_revenue}")
+
+                    revenue_transaction = db.transaction()
+                    _update_seller_revenue(revenue_transaction, seller_session_ref)
+                else:
+                    logging.warning(f"Could not find an active session for seller {seller_id} to update revenue.")
+        except Exception as revenue_e:
+            logging.error(f"An error occurred while updating seller revenue for seller {seller_id}: {revenue_e}")
+
         # Add only the new order ID to the session state.
         order_ids = session_state.get("order_ids", [])
         order_ids.append(new_order_id)
         session_state["order_ids"] = order_ids
+
 
         # Prepare the state delta to update the session.
         state_delta = {"order_ids": order_ids}
@@ -459,6 +515,7 @@ def sell_product(
                 "price_per_kg": price_per_kg,
                 "quantity_available": quantity_available,
                 "rating": None,
+                "rating_count": 0,
                 "listed_at": firestore.SERVER_TIMESTAMP,
             }
             update_time, doc_ref = db.collection(PRODUCTS_COLLECTION).add(product_data)
@@ -468,8 +525,8 @@ def sell_product(
             products_listed.append(
                 {"product_id": new_product_id, "product_name": normalized_name.title()}
             )
-            session_state["product_listed_in_market"] = products_listed
             # Prepare the state delta to update the session state.
+            session_state["product_listed_in_market"] = products_listed
             state_delta = {"product_listed_in_market": products_listed}
 
             return {
