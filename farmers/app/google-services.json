@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "673680613234",
+    "project_id": "valued-mediator-461216-k7",
+    "storage_bucket": "valued-mediator-461216-k7.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:673680613234:android:048bc09769f9865832c7eb",
+        "android_client_info": {
+          "package_name": "com.example.farmers"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBAUoIaOAnte7y-qj27_l2QKJzi0sHL0iw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:673680613234:android:dbd6374cbe04d1da32c7eb",
+        "android_client_info": {
+          "package_name": "com.example.one4farmers"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBAUoIaOAnte7y-qj27_l2QKJzi0sHL0iw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
