@@ -9,6 +9,7 @@
 - [Overview](#overview)
 - [Key Features](#key-features)
 - [Technology Stack](#technology-stack)
+- [Architecture](#architecture)
 - [Project Structure](#project-structure)
 - [API Endpoints](#api-endpoints)
 - [Setup and Deployment](#setup-and-deployment)
@@ -49,6 +50,14 @@ The core of the application is a sophisticated AI agent built with the Vertex AI
   - **Vertex AI RAG Service**: To ground the agent in specific knowledge about government schemes and agricultural practices.
 - **Database**: **Google Cloud Firestore** for storing user sessions, products, orders, and chat messages in a scalable NoSQL database.
 - **Real-time Notifications**: **Firebase Cloud Messaging (FCM)** to notify users of new messages in the community chat.
+
+## Architecture
+
+The project follows a serverless, multi-agent architecture orchestrated by the Vertex AI Reasoning Engine. The client application interacts with a set of secure HTTP endpoints hosted on Cloud Functions for Firebase. These functions act as a gateway to the core AI logic and the database.
+
+### High-Level Diagram
+
+![Architecture Diagram](Architectural-diagram.jpg)
 
 ## Project Structure
 
