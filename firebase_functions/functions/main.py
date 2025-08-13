@@ -2,6 +2,7 @@ from firebase_functions import https_fn, firestore_fn
 from firebase_functions.options import set_global_options, MemoryOption
 from firebase_admin import initialize_app, firestore, storage, messaging
 from google.cloud import translate_v2 as translate
+from google.cloud import speech
 
 import os
 import vertexai
@@ -43,6 +44,7 @@ set_global_options(
 _remote_app = None
 _db = None
 _translate_client = None
+_speech_client = None
 
 def get_remote_app():
     """
@@ -82,6 +84,18 @@ def get_translate_client():
         _translate_client = translate.Client()
         print("Google Translate client initialized.")
     return _translate_client
+
+def get_speech_client():
+    """
+    Initializes and returns the Speech-to-Text client, ensuring it's only
+    created once per function instance.
+    """
+    global _speech_client
+    if _speech_client is None:
+        print("Initializing Google Speech-to-Text client...")
+        _speech_client = speech.SpeechClient()
+        print("Google Speech-to-Text client initialized.")
+    return _speech_client
 
 
 @https_fn.on_request()
@@ -930,8 +944,8 @@ def getCommunityMessages(req: https_fn.Request) -> https_fn.Response:
 @https_fn.on_request()
 def sendCommunityMessage(req: https_fn.Request) -> https_fn.Response:
     """
-    HTTP endpoint to receive, translate, and save a new chat message.
-    Expects a JSON body like: {"senderId": "user123", "senderName": "John", "text": "Hello!"}
+    HTTP endpoint to receive, (transcribe), translate, and save a new chat message.
+    Expects a JSON body with senderId, senderName, and EITHER 'text' OR 'audio_url'.
     """
     if req.method != "POST" or not req.is_json:
         return https_fn.Response("Invalid request.", status=400)
@@ -941,21 +955,58 @@ def sendCommunityMessage(req: https_fn.Request) -> https_fn.Response:
         sender_id = data.get("senderId")
         sender_name = data.get("senderName")
         original_text = data.get("text")
+        audio_url = data.get("audio_url")
 
-        if not sender_id or not sender_name or not original_text:
-            return https_fn.Response("Missing 'senderId', 'senderName', or 'text'.", status=400)
+        if not sender_id or not sender_name:
+            return https_fn.Response("Missing 'senderId' or 'senderName'.", status=400)
 
-        # --- Translation Step ---
+        if not original_text and not audio_url:
+            return https_fn.Response("Request must include 'text' or 'audio_url'.", status=400)
+
+        # --- Speech-to-Text Step (if audio is provided) ---
+        if audio_url:
+            try:
+                print(f"Processing audio from URL: {audio_url}")
+                speech_client = get_speech_client()
+
+                # Download the audio content from the URL
+                audio_response = requests.get(audio_url)
+                audio_response.raise_for_status()
+                audio_content = audio_response.content
+
+                audio = speech.RecognitionAudio(content=audio_content)
+
+                # Configure the speech recognition request.
+                # This assumes the client sends audio in WEBM/Opus format.
+                config = speech.RecognitionConfig(
+                    encoding=speech.RecognitionConfig.AudioEncoding.WEBM_OPUS,
+                    sample_rate_hertz=16000, # Adjust if client sends a different sample rate
+                    language_code="en-IN",
+                    model="telephony", # A model optimized for audio from a phone call
+                )
+
+                print("Sending audio to Speech-to-Text API...")
+                response = speech_client.recognize(config=config, audio=audio)
+
+                if not response.results or not response.results[0].alternatives:
+                    return https_fn.Response("Could not transcribe audio.", status=400)
+                
+                original_text = response.results[0].alternatives[0].transcript
+                print(f"Successfully transcribed audio: '{original_text}'")
+            except Exception as e:
+                print(f"Error during speech-to-text processing: {e}")
+                return https_fn.Response(f"Failed to process audio: {e}", status=500)
+
+        # --- Translation Step (for original text or transcribed text) ---
         translate_client = get_translate_client()
         text_hi = original_text
         text_ta = original_text
         try:
-            # Translate to Hindi
             translation_hi = translate_client.translate(original_text, target_language='hi')
             text_hi = translation_hi['translatedText']
-            # Translate to Tamil
             translation_ta = translate_client.translate(original_text, target_language='ta')
             text_ta = translation_ta['translatedText']
+
             print(f"Translated text for storage: hi='{text_hi}', ta='{text_ta}'")
         except Exception as e:
             print(f"Warning: Translation failed. Storing original text only. Error: {e}")
@@ -1005,6 +1056,16 @@ def notifyOnNewMessage(event: firestore_fn.Event[firestore.DocumentSnapshot | No
         text_hi = message_data.get("text_hi", original_text)
         text_ta = message_data.get("text_ta", original_text)
 
+        # Convert the Firestore timestamp to a string for the payload.
+        timestamp_str = ""
+        timestamp = message_data.get("timestamp")
+        if timestamp:
+            # Firestore Timestamps can be converted to python datetimes.
+            if hasattr(timestamp, 'to_datetime') and callable(timestamp.to_datetime):
+                timestamp_str = timestamp.to_datetime().isoformat()
+            elif isinstance(timestamp, datetime):
+                timestamp_str = timestamp.isoformat()
+
         print(f"New message from {sender_name}. Notifying topic: {FCM_TOPIC}")
 
         message = messaging.Message(
@@ -1014,6 +1075,7 @@ def notifyOnNewMessage(event: firestore_fn.Event[firestore.DocumentSnapshot | No
                 'text': original_text,
                 'text_hi': text_hi,
                 'text_ta': text_ta,
+                'timestamp': timestamp_str,
             },
             topic=FCM_TOPIC,
         )
