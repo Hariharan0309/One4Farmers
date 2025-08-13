@@ -21,7 +21,7 @@ The core of the application is a sophisticated AI agent built with the Vertex AI
 
 ## Key Features
 
-***🤖 AI-Powered Conversational Agent**: A central, intelligent agent that understands user intent and orchestrates tasks related to weather, market analysis, and crop management.
+**🤖 AI-Powered Conversational Agent**: A central, intelligent agent that understands user intent and orchestrates tasks related to weather, market analysis, and crop management.
 
 - **🛒 Marketplace Hub**: A fully-functional marketplace where farmers can:
   - List their produce for sale (`sell_product`).
